@@ -94,6 +94,7 @@ typedef struct _wg_aux {
 	GtkWidget *footer_label;
 	GList *tabs;
 	GPtrArray *playback_sweeps;
+	GPtrArray *recent_sweeps;
 	guint playback_timeout;
 	int playback_index;
 	int playback_playing;
@@ -211,6 +212,73 @@ static void csv_write_sweep(FILE *file, spectool_sample_sweep *sweep) {
 	fflush(file);
 }
 
+static void csv_write_header(FILE *file) {
+	if (file == NULL)
+		return;
+
+	fprintf(file, "%s\n", SPECTOOL_CSV_MAGIC);
+	fprintf(file,
+			"# start_sec,start_usec,end_sec,end_usec,start_khz,end_khz,res_hz,"
+			"amp_offset_mdbm,amp_res_mdbm,rssi_max,min_rssi_seen,num_samples,samples...\n");
+	fflush(file);
+}
+
+static double sweep_start_seconds(spectool_sample_sweep *sweep) {
+	if (sweep == NULL)
+		return 0;
+
+	return (double) sweep->tm_start.tv_sec + ((double) sweep->tm_start.tv_usec / 1000000.0);
+}
+
+static void recent_sweeps_trim(wg_aux *auxptr, double newest_time) {
+	double cutoff = newest_time - 4.0;
+
+	if (auxptr == NULL || auxptr->recent_sweeps == NULL)
+		return;
+
+	while (auxptr->recent_sweeps->len > 0) {
+		playback_sweep *ps =
+			(playback_sweep *) g_ptr_array_index(auxptr->recent_sweeps, 0);
+
+		if (ps == NULL || ps->sweep == NULL ||
+			sweep_start_seconds(ps->sweep) >= cutoff)
+			break;
+
+		g_ptr_array_remove_index(auxptr->recent_sweeps, 0);
+	}
+}
+
+static void recent_sweeps_add(wg_aux *auxptr, spectool_sample_sweep *sweep) {
+	playback_sweep *ps;
+
+	if (auxptr == NULL || auxptr->recent_sweeps == NULL || sweep == NULL)
+		return;
+
+	ps = (playback_sweep *) malloc(sizeof(playback_sweep));
+	if (ps == NULL)
+		return;
+
+	ps->sweep = (spectool_sample_sweep *) malloc(SPECTOOL_SWEEP_SIZE(sweep->num_samples));
+	if (ps->sweep == NULL) {
+		free(ps);
+		return;
+	}
+
+	memcpy(ps->sweep, sweep, SPECTOOL_SWEEP_SIZE(sweep->num_samples));
+	g_ptr_array_add(auxptr->recent_sweeps, ps);
+	recent_sweeps_trim(auxptr, sweep_start_seconds(sweep));
+}
+
+static void main_recent_sweep_cb(int slot, int mode, spectool_sample_sweep *sweep,
+								 void *aux) {
+	nb_aux *nbaux = (nb_aux *) aux;
+
+	if (nbaux == NULL)
+		return;
+
+	recent_sweeps_add(nbaux->auxptr, sweep);
+}
+
 static void main_record_sweep_cb(int slot, int mode, spectool_sample_sweep *sweep,
 								 void *aux) {
 	wg_aux *auxptr = (wg_aux *) aux;
@@ -226,6 +294,10 @@ static void main_devopen(int slot, void *aux) {
 
 	g_return_if_fail(aux != NULL);
 
+	if (nbaux->wdr_slot >= 0)
+		wdr_del_sweepcb(nbaux->auxptr->wdr, nbaux->wdr_slot,
+						main_recent_sweep_cb, nbaux);
+
 	spectool_widget_bind_dev(nbaux->planar, nbaux->auxptr->wdr, slot);
 	spectool_widget_bind_dev(nbaux->topo, nbaux->auxptr->wdr, slot);
 	spectool_widget_bind_dev(nbaux->spectral, nbaux->auxptr->wdr, slot);
@@ -233,6 +305,8 @@ static void main_devopen(int slot, void *aux) {
 
 	nbaux->phydev = wdr_get_phy(nbaux->auxptr->wdr, slot);
 	nbaux->wdr_slot = slot;
+	wdr_add_sweepcb(nbaux->auxptr->wdr, nbaux->wdr_slot,
+					main_recent_sweep_cb, 0, nbaux);
 
 	gtk_label_set_text(GTK_LABEL(nbaux->nblabel), spectool_phy_getname(nbaux->phydev));
 
@@ -344,6 +418,8 @@ static void del_tab(nb_aux *page) {
 		auxptr->record_file = NULL;
 		auxptr->record_tab = NULL;
 	}
+	if (page->wdr_slot >= 0)
+		wdr_del_sweepcb(auxptr->wdr, page->wdr_slot, main_recent_sweep_cb, page);
 
 	/* Tear down all the graphs */
 	free(page->p_con);
@@ -562,6 +638,35 @@ static void main_menu_reset_planar_peak(gpointer *data, gpointer *aux) {
 	spectool_widget_update(GTK_WIDGET(wwidget));
 }
 
+static void capture_recent_csv(wg_aux *auxptr, const char *filename) {
+	FILE *file;
+	unsigned int x;
+
+	if (auxptr == NULL || filename == NULL)
+		return;
+
+	file = fopen(filename, "w");
+	if (file == NULL) {
+		char errstr[SPECTOOL_ERROR_MAX];
+		snprintf(errstr, sizeof(errstr), "Unable to save recent CSV: %s",
+				 strerror(errno));
+		Spectool_Alert_Dialog(errstr);
+		return;
+	}
+
+	csv_write_header(file);
+	if (auxptr->recent_sweeps != NULL) {
+		for (x = 0; x < auxptr->recent_sweeps->len; x++) {
+			playback_sweep *ps =
+				(playback_sweep *) g_ptr_array_index(auxptr->recent_sweeps, x);
+			if (ps != NULL)
+				csv_write_sweep(file, ps->sweep);
+		}
+	}
+
+	fclose(file);
+}
+
 static void main_menu_capture_window(gpointer *data, gpointer *aux) {
 	wg_aux *auxptr = (wg_aux *) data;
 	GdkWindow *window;
@@ -571,6 +676,7 @@ static void main_menu_capture_window(gpointer *data, gpointer *aux) {
 	time_t now;
 	struct tm *tmnow;
 	char filename[128];
+	char csvfilename[128];
 	int width, height;
 
 	g_return_if_fail(auxptr != NULL);
@@ -585,6 +691,8 @@ static void main_menu_capture_window(gpointer *data, gpointer *aux) {
 		return;
 
 	if (strftime(filename, sizeof(filename), "spectool_%Y%m%d_%H%M%S.png", tmnow) == 0)
+		return;
+	if (strftime(csvfilename, sizeof(csvfilename), "spectool_%Y%m%d_%H%M%S.csv", tmnow) == 0)
 		return;
 
 	gdk_drawable_get_size(GDK_DRAWABLE(window), &width, &height);
@@ -608,6 +716,7 @@ static void main_menu_capture_window(gpointer *data, gpointer *aux) {
 	}
 
 	g_object_unref(pixbuf);
+	capture_recent_csv(auxptr, csvfilename);
 }
 
 static void main_menu_start_record(gpointer *data, gpointer *aux) {
@@ -645,11 +754,7 @@ static void main_menu_start_record(gpointer *data, gpointer *aux) {
 		return;
 	}
 
-	fprintf(auxptr->record_file, "%s\n", SPECTOOL_CSV_MAGIC);
-	fprintf(auxptr->record_file,
-			"# start_sec,start_usec,end_sec,end_usec,start_khz,end_khz,res_hz,"
-			"amp_offset_mdbm,amp_res_mdbm,rssi_max,min_rssi_seen,num_samples,samples...\n");
-	fflush(auxptr->record_file);
+	csv_write_header(auxptr->record_file);
 
 	auxptr->record_tab = nbaux;
 	wdr_add_sweepcb(auxptr->wdr, nbaux->wdr_slot, main_record_sweep_cb, 0, auxptr);
@@ -700,6 +805,8 @@ static void main_stop_tab_live_device(wg_aux *auxptr, nb_aux *nbaux) {
 
 	if (auxptr->record_tab == nbaux)
 		main_menu_stop_record((gpointer *) auxptr, NULL);
+
+	wdr_del_sweepcb(auxptr->wdr, nbaux->wdr_slot, main_recent_sweep_cb, nbaux);
 
 	spectool_widget_unbind_dev(nbaux->planar);
 	spectool_widget_unbind_dev(nbaux->topo);
@@ -777,6 +884,8 @@ static void playback_clear(wg_aux *auxptr) {
 
 	if (auxptr->playback_sweeps != NULL)
 		g_ptr_array_set_size(auxptr->playback_sweeps, 0);
+	if (auxptr->recent_sweeps != NULL)
+		g_ptr_array_set_size(auxptr->recent_sweeps, 0);
 
 	gtk_button_set_label(GTK_BUTTON(auxptr->playback_play_button), "Play");
 	gtk_range_set_range(GTK_RANGE(auxptr->playback_seek), 0, 1);
@@ -807,6 +916,7 @@ static void playback_feed_index(wg_aux *auxptr, int index) {
 
 	ps = (playback_sweep *) g_ptr_array_index(auxptr->playback_sweeps, index);
 	auxptr->playback_index = index;
+	recent_sweeps_add(auxptr, ps->sweep);
 
 	if (index == 0) {
 		spectool_widget_feed_sweep(nbaux->planar, SPECTOOL_POLL_CONFIGURED, ps->sweep);
@@ -1039,6 +1149,7 @@ int main(int argc, char *argv[]) {
 	auxptr.footer_label = NULL;
 	auxptr.tabs = NULL;
 	auxptr.playback_sweeps = g_ptr_array_new_with_free_func(playback_sweep_free);
+	auxptr.recent_sweeps = g_ptr_array_new_with_free_func(playback_sweep_free);
 	auxptr.playback_timeout = 0;
 	auxptr.playback_index = 0;
 	auxptr.playback_playing = 0;
@@ -1126,6 +1237,8 @@ int main(int argc, char *argv[]) {
 		fclose(auxptr.record_file);
 	if (auxptr.playback_sweeps != NULL)
 		g_ptr_array_free(auxptr.playback_sweeps, TRUE);
+	if (auxptr.recent_sweeps != NULL)
+		g_ptr_array_free(auxptr.recent_sweeps, TRUE);
 
 	return 0;
 }	
