@@ -112,10 +112,15 @@ static void spectool_widget_wdr_sweep(int slot, int mode,
 								  wwidget->sweep_keep_peak);
 		}
 
-		wwidget->amp_offset_mdbm = 
-			spectool_phy_getcurprofile(wwidget->phydev)->amp_offset_mdbm;
-		wwidget->amp_res_mdbm = 
-			spectool_phy_getcurprofile(wwidget->phydev)->amp_res_mdbm;
+		if (sweep != NULL) {
+			wwidget->amp_offset_mdbm = sweep->amp_offset_mdbm;
+			wwidget->amp_res_mdbm = sweep->amp_res_mdbm;
+		} else if (wwidget->phydev != NULL) {
+			wwidget->amp_offset_mdbm =
+				spectool_phy_getcurprofile(wwidget->phydev)->amp_offset_mdbm;
+			wwidget->amp_res_mdbm =
+				spectool_phy_getcurprofile(wwidget->phydev)->amp_res_mdbm;
+		}
 
 		/*
 		wwidget->base_db_offset =
@@ -141,6 +146,33 @@ static void spectool_widget_wdr_sweep(int slot, int mode,
 	/* Call the secondary sweep handler */
 	if (wwidget->wdr_sweep_func != NULL)
 		(*(wwidget->wdr_sweep_func))(slot, mode, sweep, aux);
+}
+
+void spectool_widget_feed_sweep(GtkWidget *widget, int mode, spectool_sample_sweep *sweep) {
+	g_return_if_fail(widget != NULL);
+	g_return_if_fail(IS_SPECTOOL_WIDGET(widget));
+
+	spectool_widget_wdr_sweep(-1, mode, sweep, widget);
+}
+
+void spectool_widget_unbind_dev(GtkWidget *widget) {
+	SpectoolWidget *wwidget;
+
+	g_return_if_fail(widget != NULL);
+	g_return_if_fail(IS_SPECTOOL_WIDGET(widget));
+
+	wwidget = SPECTOOL_WIDGET(widget);
+
+	if (wwidget->wdr == NULL || wwidget->wdr_slot < 0)
+		return;
+
+	wdr_del_sweepcb(wwidget->wdr, wwidget->wdr_slot,
+					spectool_widget_wdr_sweep, wwidget);
+	wdr_del_ref(wwidget->wdr, wwidget->wdr_slot);
+
+	wwidget->wdr_slot = -1;
+	wwidget->phydev = NULL;
+	wwidget->wdr = NULL;
 }
 
 /* Common level function for opening a device, calls the secondary level
@@ -710,8 +742,9 @@ void spectool_widget_graphics_update(SpectoolWidget *wwidget) {
 	wwidget->g_end_x = wwidget->g_start_x + wwidget->g_len_x;
 	wwidget->g_end_y = wwidget->g_start_y + wwidget->g_len_y;
 
-	/* We haven't been initialized so we don't know... anything */
-	if (wwidget->wdr_slot < 0) {
+	/* Live views have a device slot; CSV playback only needs sweep data. */
+	if (wwidget->wdr_slot < 0 &&
+		(wwidget->sweepcache == NULL || wwidget->sweepcache->latest == NULL)) {
 		cairo_destroy(offcr);
 		return;
 	}
@@ -1065,4 +1098,3 @@ void spectool_widget_context_dbmlines(gpointer *aux) {
 
 	spectool_widget_update(GTK_WIDGET(wwidget));
 }
-

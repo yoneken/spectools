@@ -47,6 +47,7 @@ static gboolean spectool_planar_mouse_move(GtkWidget *widget,
 										gpointer *aux);
 
 void spectool_widget_update(GtkWidget *widget);
+void spectool_planar_update(GtkWidget *widget);
 
 G_DEFINE_TYPE(SpectoolPlanar, spectool_planar, SPECTOOL_TYPE_WIDGET);
 
@@ -264,8 +265,8 @@ void spectool_planar_draw(GtkWidget *widget, cairo_t *cr, SpectoolWidget *wwidge
 		int sdb;
 		mkr = (spectool_planar_marker *) mkr_iter->data;
 
-		if (mkr->samp_num < 0 || 
-			mkr->samp_num > wwidget->sweepcache->latest->num_samples) {
+		if (mkr->samp_num < 0 ||
+			mkr->samp_num >= wwidget->sweepcache->latest->num_samples) {
 			mkr_iter = g_list_next(mkr_iter);
 			continue;
 		}
@@ -326,17 +327,22 @@ static void spectool_planar_wdr_sweep(int slot, int mode,
 
 	tout = wwidget->draw_timeout;
 
-	/* Update the timer */
-	if (sweep != NULL && sweep->phydev != NULL) {
-		pd = (spectool_phy *) sweep->phydev;
+	/* Update the timer when live metadata exists; CSV playback still updates agecache. */
+	if (sweep != NULL) {
+		if (sweep->phydev != NULL) {
+			pd = (spectool_phy *) sweep->phydev;
 #ifdef HAVE_HILDON
-		tout = 300 * pd->draw_agg_suggestion;
+			tout = 300 * pd->draw_agg_suggestion;
 #else
-		tout = 100 * pd->draw_agg_suggestion;
+			tout = 100 * pd->draw_agg_suggestion;
 #endif
+		}
 
 		spectool_cache_append(planar->agecache, sweep);
 	}
+
+	if ((mode & SPECTOOL_POLL_SWEEPCOMPLETE))
+		spectool_planar_update(GTK_WIDGET(planar));
 
 	if (tout != wwidget->draw_timeout) {
 		wwidget->draw_timeout = tout;
@@ -468,8 +474,8 @@ void spectool_planar_update(GtkWidget *widget) {
 	while (valid && planar->draw_markers) {
 		gtk_tree_model_get(model, &iter, 5, &mkr, -1);
 
-		if (mkr->samp_num < 0 || 
-			mkr->samp_num > wwidget->sweepcache->latest->num_samples) {
+		if (mkr->samp_num < 0 ||
+			mkr->samp_num >= wwidget->sweepcache->latest->num_samples) {
 			gtk_list_store_set(GTK_LIST_STORE(model), &iter,
 							   0, mkr->pixbuf,
 							   1, "----",
@@ -983,4 +989,3 @@ static void spectool_planar_init(SpectoolPlanar *planar) {
 	planar->draw_avg = 1;
 	planar->draw_cur = 1;
 }
-

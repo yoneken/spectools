@@ -187,6 +187,9 @@ void spectool_widget_buildgui(SpectoolWidget *widget);
 
 /* Update the backing graphics */
 void spectool_widget_graphics_update(SpectoolWidget *wwidget);
+void spectool_widget_update(GtkWidget *widget);
+void spectool_widget_feed_sweep(GtkWidget *widget, int mode, spectool_sample_sweep *sweep);
+void spectool_widget_unbind_dev(GtkWidget *widget);
 
 SpectoolWidgetController *spectool_widget_buildcontroller(GtkWidget *widget);
 
@@ -212,4 +215,3 @@ G_END_DECLS
 
 #endif
 #endif
-

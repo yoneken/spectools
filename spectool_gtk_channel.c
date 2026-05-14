@@ -85,7 +85,8 @@ void spectool_channel_draw(GtkWidget *widget, cairo_t *cr, SpectoolWidget *wwidg
 	SpectoolChannel *channel;
 	cairo_text_extents_t extents;
 	int x, chpix;
-	char mtext[128];
+	char mtext[128], freqtext[128];
+	double chan_width, label_height;
 
 	g_return_if_fail(widget != NULL);
 
@@ -165,7 +166,6 @@ void spectool_channel_draw(GtkWidget *widget, cairo_t *cr, SpectoolWidget *wwidg
 				snprintf(mtext, 128, "%s", 
 						 wwidget->chanopts->chanset->chan_text[x]);
 			}
-
 			cairo_move_to(cr, wwidget->g_start_x + chpix, 
 						  wwidget->g_start_y);
 			cairo_line_to(cr, wwidget->g_start_x + chpix, wwidget->g_start_y + 5);
@@ -176,18 +176,20 @@ void spectool_channel_draw(GtkWidget *widget, cairo_t *cr, SpectoolWidget *wwidg
 								   CAIRO_FONT_WEIGHT_BOLD);
 			cairo_set_font_size(cr, 14);
 			cairo_text_extents(cr, mtext, &extents);
+			chan_width = extents.width;
+			label_height = extents.height;
 			cairo_move_to(cr, 
-						  wwidget->g_start_x + chpix - (extents.width / 2),
-						  wwidget->g_start_y + 10 + extents.height);
+						  wwidget->g_start_x + chpix - (chan_width / 2),
+						  wwidget->g_start_y + 10 + label_height);
 			cairo_show_text(cr, mtext);
 
 			channel->chan_points[x].x = 
-				wwidget->g_start_x + chpix - (extents.width / 2) - 4;
+				wwidget->g_start_x + chpix - (chan_width / 2) - 4;
 			channel->chan_points[x].y = wwidget->g_start_y + 10 - 4;
 			channel->chan_points[x + wwidget->chanopts->chanset->chan_num].x =
-				channel->chan_points[x].x + extents.width + 8;
+				channel->chan_points[x].x + chan_width + 8;
 			channel->chan_points[x + wwidget->chanopts->chanset->chan_num].y =
-				channel->chan_points[x].y + extents.height + 10;
+				channel->chan_points[x].y + label_height + 10;
 
 			if (wwidget->chanopts->chanhit[x]) {
 				cairo_save(cr);
@@ -196,10 +198,10 @@ void spectool_channel_draw(GtkWidget *widget, cairo_t *cr, SpectoolWidget *wwidg
 								wwidget->chanopts->chancolors[(3 * x) + 1],
 								wwidget->chanopts->chancolors[(3 * x) + 2], 0.60);
 				cairo_rectangle(cr,
-						wwidget->g_start_x + chpix - (extents.width / 2) - 3.5,
+						wwidget->g_start_x + chpix - (chan_width / 2) - 3.5,
 						wwidget->g_start_y + 10 - 3.5,
-								extents.width + 8,
-								extents.height + 10);
+								chan_width + 8,
+								label_height + 10);
 				cairo_fill(cr);
 				/* cairo_stroke(cr); */
 				cairo_restore(cr);
@@ -212,6 +214,37 @@ void spectool_channel_draw(GtkWidget *widget, cairo_t *cr, SpectoolWidget *wwidg
 		channel->chan_start_y = channel->chan_points[0].y - 1;
 		channel->chan_end_y = 
 			channel->chan_points[(wwidget->chanopts->chanset->chan_num * 2) - 1].y + 1;
+
+		cairo_select_font_face(cr, "Helvetica",
+							   CAIRO_FONT_SLANT_NORMAL,
+							   CAIRO_FONT_WEIGHT_NORMAL);
+		cairo_set_font_size(cr, 9);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+
+		for (x = 2400; x <= 2500; x += 10) {
+			int freq_khz = x * 1000;
+
+			if (freq_khz < wwidget->sweepcache->latest->start_khz ||
+				freq_khz > wwidget->sweepcache->latest->end_khz)
+				continue;
+
+			chpix = ((float) wwidget->g_len_x /
+					 (wwidget->sweepcache->latest->end_khz -
+					  wwidget->sweepcache->latest->start_khz)) *
+				(freq_khz - wwidget->sweepcache->latest->start_khz);
+
+			snprintf(freqtext, 128, "%d", x);
+			cairo_text_extents(cr, freqtext, &extents);
+			cairo_move_to(cr, wwidget->g_start_x + chpix,
+						  wwidget->g_start_y + 30);
+			cairo_line_to(cr, wwidget->g_start_x + chpix,
+						  wwidget->g_start_y + 35);
+			cairo_stroke(cr);
+			cairo_move_to(cr,
+						  wwidget->g_start_x + chpix - (extents.width / 2),
+						  wwidget->g_start_y + 37 + extents.height);
+			cairo_show_text(cr, freqtext);
+		}
 
 		cairo_restore(cr);
 
@@ -356,7 +389,7 @@ static void spectool_channel_size_request (GtkWidget *widget, GtkRequisition *re
 	SpectoolWidget *wwidget = SPECTOOL_WIDGET(widget);
 
 	requisition->width = 0;
-	requisition->height = 25;
+	requisition->height = 50;
 
 	if (GTK_BIN(wwidget)->child && GTK_WIDGET_VISIBLE(GTK_BIN(wwidget)->child)) {
 		GtkRequisition child_requisition;
@@ -473,4 +506,3 @@ void spectool_channel_append_update(GtkWidget *widget, GtkWidget *update) {
 
 	channel->update_list = g_list_append(channel->update_list, update);
 }
-

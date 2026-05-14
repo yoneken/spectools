@@ -8,3 +8,7 @@ config.h
 config.log
 config.status
 Makefile
+.vscode/
+memo.txt
+*.csv
+*.png

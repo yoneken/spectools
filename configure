@@ -3916,7 +3916,7 @@ ac_fn_c_check_header_mongrel "$LINENO" "usb.h" "ac_cv_header_usb_h" "$ac_include
 if test "x$ac_cv_header_usb_h" = xyes; then :
 
 else
-  as_fn_error please install libusb-0.1.x or the compatibility layers. "*** LibUSB 0.1.x required - Libusb 1.x.x not currently supported" "$LINENO" 5
+  as_fn_error $? "*** LibUSB 0.1.x required - Libusb 1.x.x not currently supported, please install libusb-0.1.x or the compatibility layers." "$LINENO" 5
 fi
 
 
@@ -3961,7 +3961,7 @@ if test "x$ac_cv_lib_usb_usb_init" = xyes; then :
 $as_echo "#define HAVE_LIBUSB 1" >>confdefs.h
  LIBS="$LIBS -lusb"
 else
-  as_fn_error please install libusb-0.1.x or the compatability layers.  Linking -lusb failed. "*** LibUSB 0.1.x required - libusb 1.x.x not currently supported" "$LINENO" 5
+  as_fn_error $? "*** LibUSB 0.1.x required - libusb 1.x.x not currently supported, please install libusb-0.1.x or the compatability layers.  Linking -lusb failed." "$LINENO" 5
 fi
 
 

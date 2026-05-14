@@ -118,11 +118,18 @@ void spectool_topo_draw(GtkWidget *widget, cairo_t *cr, SpectoolWidget *wwidget)
 	// 2/3rds down, up a bit to dodge noise floor
 	// int avg_db = (((abs(wwidget->min_db_draw) - abs(wwidget->base_db_offset)) / 3) * 2) - 3 - abs(wwidget->base_db_offset);;
 	// int avg_db = ((abs(wwidget->min_db_draw) / 3) * 2) - abs(wwidget->base_db_offset);
-	int mindb = SPECTOOL_RSSI_CONVERT(wwidget->amp_offset_mdbm, 
-									wwidget->amp_res_mdbm, 
+	int mindb = wwidget->min_db_draw;
+	if (wwidget->phydev != NULL) {
+		mindb = SPECTOOL_RSSI_CONVERT(wwidget->amp_offset_mdbm,
+									wwidget->amp_res_mdbm,
 									wwidget->phydev->min_rssi_seen);
+	}
 	int avg_db = ((abs(mindb) / 3) * 2) - abs(wwidget->base_db_offset);
 	int avg_peak = 1;
+	if (avg_db < 0)
+		avg_db = 0;
+	if (avg_db >= topo->sch)
+		avg_db = topo->sch - 1;
 
 	// printf("row %d, db %d\n", avg_db, avg_db + abs(wwidget->base_db_offset));
 	for (samp = 0; samp < topo->scw; samp++) {
@@ -292,8 +299,14 @@ static void spectool_topo_wdr_sweep(int slot, int mode,
 		// 2d plot; #samples wide, normalized dbrange high
 		topo->sch = abs(wwidget->min_db_draw) - abs(wwidget->base_db_offset);
 
-		topo->scw =
-			spectool_phy_getcurprofile(wwidget->phydev)->num_samples;
+		if (sweep != NULL) {
+			topo->scw = sweep->num_samples;
+		} else if (wwidget->phydev != NULL) {
+			topo->scw =
+				spectool_phy_getcurprofile(wwidget->phydev)->num_samples;
+		} else {
+			return;
+		}
 
 		topo->sample_counts = (unsigned int *)
 			malloc(sizeof(unsigned int) * topo->sch * topo->scw);
@@ -552,4 +565,3 @@ static void spectool_topo_init(SpectoolTopo *topo) {
 	gtk_widget_show(legendh);
 	gtk_widget_show(topo->legend_pix);
 }
-
