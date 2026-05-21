@@ -38,6 +38,7 @@
 #define GETTEXT_PACKAGE	"spectool_gtk"
 #define LOCALEDIR		"/usr/share/locale/spectool_gtk"
 #define SPECTOOL_CSV_MAGIC	"# spectool_csv_v1"
+#define SPECTOOL_CAPTURE_CSV_SECONDS	60.0
 
 typedef struct _playback_sweep {
 	spectool_sample_sweep *sweep;
@@ -95,10 +96,13 @@ typedef struct _wg_aux {
 	GList *tabs;
 	GPtrArray *playback_sweeps;
 	GPtrArray *recent_sweeps;
+	spectool_sweep_cache *playback_spectral_agg_cache;
 	guint playback_timeout;
 	int playback_index;
 	int playback_playing;
 	int playback_loaded;
+	int playback_spectral_aggregate;
+	int playback_spectral_agg_pos;
 	FILE *record_file;
 	nb_aux *record_tab;
 	int num_tabs;
@@ -231,7 +235,7 @@ static double sweep_start_seconds(spectool_sample_sweep *sweep) {
 }
 
 static void recent_sweeps_trim(wg_aux *auxptr, double newest_time) {
-	double cutoff = newest_time - 4.0;
+	double cutoff = newest_time - SPECTOOL_CAPTURE_CSV_SECONDS;
 
 	if (auxptr == NULL || auxptr->recent_sweeps == NULL)
 		return;
@@ -872,6 +876,17 @@ static spectool_sample_sweep *csv_parse_sweep_line(char *line) {
 	return sweep;
 }
 
+static void playback_spectral_aggregate_clear(wg_aux *auxptr) {
+	if (auxptr == NULL)
+		return;
+
+	if (auxptr->playback_spectral_agg_cache != NULL) {
+		spectool_cache_free(auxptr->playback_spectral_agg_cache);
+		auxptr->playback_spectral_agg_cache = NULL;
+	}
+	auxptr->playback_spectral_agg_pos = 0;
+}
+
 static void playback_clear(wg_aux *auxptr) {
 	if (auxptr->playback_timeout > 0) {
 		g_source_remove(auxptr->playback_timeout);
@@ -881,6 +896,7 @@ static void playback_clear(wg_aux *auxptr) {
 	auxptr->playback_playing = 0;
 	auxptr->playback_loaded = 0;
 	auxptr->playback_index = 0;
+	playback_spectral_aggregate_clear(auxptr);
 
 	if (auxptr->playback_sweeps != NULL)
 		g_ptr_array_set_size(auxptr->playback_sweeps, 0);
@@ -892,9 +908,74 @@ static void playback_clear(wg_aux *auxptr) {
 	gtk_range_set_value(GTK_RANGE(auxptr->playback_seek), 0);
 }
 
+static void playback_feed_spectral_sweep(wg_aux *auxptr, nb_aux *nbaux,
+										 spectool_sample_sweep *sweep) {
+	int aggregate;
+
+	if (auxptr == NULL || nbaux == NULL || sweep == NULL)
+		return;
+
+	aggregate = auxptr->playback_spectral_aggregate;
+	if (aggregate != 3)
+		aggregate = 1;
+
+	if (aggregate == 1) {
+		spectool_widget_feed_sweep(nbaux->spectral,
+								   SPECTOOL_POLL_SWEEPCOMPLETE, sweep);
+		return;
+	}
+
+	if (auxptr->playback_spectral_agg_cache == NULL) {
+		auxptr->playback_spectral_agg_cache =
+			spectool_cache_alloc(aggregate, 1, 0);
+		auxptr->playback_spectral_agg_pos = 0;
+	}
+
+	if (auxptr->playback_spectral_agg_cache == NULL)
+		return;
+
+	spectool_cache_append(auxptr->playback_spectral_agg_cache, sweep);
+	auxptr->playback_spectral_agg_pos++;
+
+	if (auxptr->playback_spectral_agg_pos == aggregate) {
+		spectool_widget_feed_sweep(nbaux->spectral,
+								   SPECTOOL_POLL_SWEEPCOMPLETE,
+								   auxptr->playback_spectral_agg_cache->peak);
+		spectool_cache_clear(auxptr->playback_spectral_agg_cache);
+		auxptr->playback_spectral_agg_pos = 0;
+	}
+}
+
+static void playback_rebuild_spectral_to_index(wg_aux *auxptr, nb_aux *nbaux,
+											   int index) {
+	int x;
+	playback_sweep *first;
+
+	if (auxptr == NULL || nbaux == NULL || auxptr->playback_sweeps == NULL ||
+		index < 0 || index >= (int) auxptr->playback_sweeps->len)
+		return;
+
+	first = (playback_sweep *) g_ptr_array_index(auxptr->playback_sweeps, 0);
+	if (first == NULL || first->sweep == NULL)
+		return;
+
+	playback_spectral_aggregate_clear(auxptr);
+	spectool_widget_feed_sweep(nbaux->spectral, SPECTOOL_POLL_CONFIGURED,
+							   first->sweep);
+
+	for (x = 0; x <= index; x++) {
+		playback_sweep *ps =
+			(playback_sweep *) g_ptr_array_index(auxptr->playback_sweeps, x);
+		if (ps != NULL)
+			playback_feed_spectral_sweep(auxptr, nbaux, ps->sweep);
+	}
+}
+
 static void playback_feed_index(wg_aux *auxptr, int index) {
 	nb_aux *nbaux;
 	playback_sweep *ps;
+	int old_index;
+	int rebuild_spectral;
 
 	if (!auxptr->playback_loaded || auxptr->playback_sweeps == NULL ||
 		index < 0 || index >= (int) auxptr->playback_sweeps->len)
@@ -915,20 +996,24 @@ static void playback_feed_index(wg_aux *auxptr, int index) {
 	gtk_label_set_text(GTK_LABEL(nbaux->nblabel), "CSV playback");
 
 	ps = (playback_sweep *) g_ptr_array_index(auxptr->playback_sweeps, index);
+	old_index = auxptr->playback_index;
 	auxptr->playback_index = index;
 	recent_sweeps_add(auxptr, ps->sweep);
+	rebuild_spectral = (index == 0 || index != old_index + 1);
 
 	if (index == 0) {
 		spectool_widget_feed_sweep(nbaux->planar, SPECTOOL_POLL_CONFIGURED, ps->sweep);
 		spectool_widget_feed_sweep(nbaux->topo, SPECTOOL_POLL_CONFIGURED, ps->sweep);
-		spectool_widget_feed_sweep(nbaux->spectral, SPECTOOL_POLL_CONFIGURED, ps->sweep);
 		spectool_widget_feed_sweep(nbaux->channel, SPECTOOL_POLL_CONFIGURED, ps->sweep);
 	}
 
 	spectool_widget_feed_sweep(nbaux->planar, SPECTOOL_POLL_SWEEPCOMPLETE, ps->sweep);
 	spectool_widget_feed_sweep(nbaux->topo, SPECTOOL_POLL_SWEEPCOMPLETE, ps->sweep);
-	spectool_widget_feed_sweep(nbaux->spectral, SPECTOOL_POLL_SWEEPCOMPLETE, ps->sweep);
 	spectool_widget_feed_sweep(nbaux->channel, SPECTOOL_POLL_SWEEPCOMPLETE, ps->sweep);
+	if (rebuild_spectral)
+		playback_rebuild_spectral_to_index(auxptr, nbaux, index);
+	else
+		playback_feed_spectral_sweep(auxptr, nbaux, ps->sweep);
 
 	spectool_widget_graphics_update(SPECTOOL_WIDGET(nbaux->planar));
 	spectool_widget_graphics_update(SPECTOOL_WIDGET(nbaux->topo));
@@ -1002,6 +1087,35 @@ static void playback_seek_changed(GtkRange *range, gpointer data) {
 	index = (int) gtk_range_get_value(range);
 	if (index != auxptr->playback_index)
 		playback_feed_index(auxptr, index);
+}
+
+static void main_menu_set_csv_aggregate(gpointer data, guint action,
+										 GtkWidget *widget) {
+	wg_aux *auxptr = (wg_aux *) data;
+	nb_aux *nbaux;
+
+	if (auxptr == NULL)
+		return;
+
+	if (action != 1 && action != 3)
+		return;
+
+	if (auxptr->playback_spectral_aggregate == (int) action)
+		return;
+
+	auxptr->playback_spectral_aggregate = action;
+	playback_spectral_aggregate_clear(auxptr);
+
+	if (!auxptr->playback_loaded)
+		return;
+
+	nbaux = main_get_current_tab(auxptr);
+	if (nbaux == NULL)
+		return;
+
+	playback_rebuild_spectral_to_index(auxptr, nbaux, auxptr->playback_index);
+	spectool_widget_graphics_update(SPECTOOL_WIDGET(nbaux->spectral));
+	spectool_widget_update(nbaux->spectral);
 }
 
 static void main_menu_load_csv(gpointer *data, gpointer *aux) {
@@ -1090,6 +1204,9 @@ static GtkItemFactoryEntry main_menu_items[] = {
 	{ "/SpecAn/Start CSV Recording", NULL, main_menu_start_record, 0, "<Item>" },
 	{ "/SpecAn/Stop CSV Recording", NULL, main_menu_stop_record, 0, "<Item>" },
 	{ "/SpecAn/Load CSV", NULL, main_menu_load_csv, 0, "<Item>" },
+	{ "/SpecAn/CSV Sweep Aggregate", NULL, NULL, 0, "<Branch>" },
+	{ "/SpecAn/CSV Sweep Aggregate/1", NULL, main_menu_set_csv_aggregate, 1, "<Item>" },
+	{ "/SpecAn/CSV Sweep Aggregate/3", NULL, main_menu_set_csv_aggregate, 3, "<Item>" },
 	{ "/SpecAn/Reset Planar Peak", "r", main_menu_reset_planar_peak, 0, "<Item>" },
 	{ "/SpecAn/Capture Window", "space", main_menu_capture_window, 0, "<Item>" },
 	{ "/SpecAn/_Quit",		"<control>Q",	gtk_main_quit, 0, "<Item>" },
@@ -1150,10 +1267,13 @@ int main(int argc, char *argv[]) {
 	auxptr.tabs = NULL;
 	auxptr.playback_sweeps = g_ptr_array_new_with_free_func(playback_sweep_free);
 	auxptr.recent_sweeps = g_ptr_array_new_with_free_func(playback_sweep_free);
+	auxptr.playback_spectral_agg_cache = NULL;
 	auxptr.playback_timeout = 0;
 	auxptr.playback_index = 0;
 	auxptr.playback_playing = 0;
 	auxptr.playback_loaded = 0;
+	auxptr.playback_spectral_aggregate = 1;
+	auxptr.playback_spectral_agg_pos = 0;
 	auxptr.record_file = NULL;
 	auxptr.record_tab = NULL;
 	auxptr.num_tabs = 0;
@@ -1235,6 +1355,7 @@ int main(int argc, char *argv[]) {
 
 	if (auxptr.record_file != NULL)
 		fclose(auxptr.record_file);
+	playback_spectral_aggregate_clear(&auxptr);
 	if (auxptr.playback_sweeps != NULL)
 		g_ptr_array_free(auxptr.playback_sweeps, TRUE);
 	if (auxptr.recent_sweeps != NULL)

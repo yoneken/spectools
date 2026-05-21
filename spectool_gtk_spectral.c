@@ -118,6 +118,154 @@ float spect_21_colormap[] = {
 };
 int spect_21_colormap_len = 50;
 
+static double spectool_spectral_sweep_seconds(spectool_sample_sweep *sweep) {
+	if (sweep == NULL)
+		return 0;
+
+	return (double) sweep->tm_start.tv_sec +
+		((double) sweep->tm_start.tv_usec / 1000000.0);
+}
+
+static void spectool_spectral_format_age(int age, char *text, size_t len) {
+	if (text == NULL || len == 0)
+		return;
+
+	if (age < 0)
+		age = 0;
+
+	snprintf(text, len, "%ds", age);
+}
+
+static int spectool_spectral_first_visible(SpectoolWidget *wwidget, int sh) {
+	int rows_visible;
+	int rows_used;
+	int nsamp;
+
+	rows_visible = wwidget->g_len_y / sh;
+	if (rows_visible < 1)
+		rows_visible = 1;
+	if (rows_visible > wwidget->sweepcache->num_alloc)
+		rows_visible = wwidget->sweepcache->num_alloc;
+
+	rows_used = wwidget->sweepcache->looped ?
+		wwidget->sweepcache->num_alloc : wwidget->sweepcache->pos + 1;
+	if (rows_visible > rows_used)
+		rows_visible = rows_used;
+
+	if (rows_visible <= 1)
+		return wwidget->sweepcache->pos;
+
+	nsamp = wwidget->sweepcache->pos - (rows_visible - 1);
+	if (nsamp < 0)
+		nsamp += wwidget->sweepcache->num_alloc;
+
+	if (nsamp < 0)
+		nsamp = 0;
+
+	if (nsamp >= wwidget->sweepcache->num_alloc)
+		nsamp = 0;
+
+	return nsamp;
+}
+
+static void spectool_spectral_draw_time_axis(cairo_t *cr, SpectoolWidget *wwidget,
+											 double axis_seconds) {
+	cairo_text_extents_t extents;
+	char text[32];
+	int age, max_tick, bottom_age;
+	double tx, y, ty;
+
+	if (axis_seconds < 0)
+		axis_seconds = 0;
+
+	max_tick = ((int) floor(axis_seconds / 10.0)) * 10;
+	if (max_tick < 0)
+		max_tick = 0;
+
+	cairo_save(cr);
+	cairo_select_font_face(cr, "Helvetica",
+						   CAIRO_FONT_SLANT_NORMAL,
+						   CAIRO_FONT_WEIGHT_BOLD);
+	cairo_set_font_size(cr, 10);
+
+	for (age = 0; age <= max_tick; age += 10) {
+		spectool_spectral_format_age(age, text, sizeof(text));
+		cairo_text_extents(cr, text, &extents);
+
+		if (axis_seconds > 0) {
+			y = wwidget->g_start_y + (((double) age / axis_seconds) * wwidget->g_len_y);
+		} else {
+			y = wwidget->g_start_y;
+		}
+
+		if (y < wwidget->g_start_y)
+			y = wwidget->g_start_y;
+		if (y > wwidget->g_end_y)
+			y = wwidget->g_end_y;
+
+		tx = wwidget->g_start_x - wwidget->dbm_w;
+		if (tx < 0)
+			tx = 0;
+		ty = y + (extents.height / 2);
+		if (ty > wwidget->g_end_y - 2)
+			ty = wwidget->g_end_y - 2;
+		if (ty - extents.height < wwidget->g_start_y)
+			ty = wwidget->g_start_y + extents.height;
+
+		cairo_set_source_rgba(cr, 1, 1, 1, 0.85);
+		cairo_move_to(cr, wwidget->g_start_x - 8.5, y + 0.5);
+		cairo_line_to(cr, wwidget->g_start_x, y + 0.5);
+		cairo_stroke(cr);
+
+		cairo_move_to(cr, tx, ty);
+		cairo_show_text(cr, text);
+	}
+
+	bottom_age = (int) floor(axis_seconds + 0.5);
+	if (bottom_age > max_tick) {
+		spectool_spectral_format_age(bottom_age, text, sizeof(text));
+		cairo_text_extents(cr, text, &extents);
+		tx = wwidget->g_start_x - wwidget->dbm_w;
+		if (tx < 0)
+			tx = 0;
+
+		cairo_set_source_rgba(cr, 1, 1, 1, 0.85);
+		cairo_move_to(cr, wwidget->g_start_x - 8.5, wwidget->g_end_y + 0.5);
+		cairo_line_to(cr, wwidget->g_start_x, wwidget->g_end_y + 0.5);
+		cairo_stroke(cr);
+
+		cairo_move_to(cr, tx, wwidget->g_end_y - 2);
+		cairo_show_text(cr, text);
+	}
+
+	cairo_restore(cr);
+}
+
+static void spectool_spectral_update_time_axis(SpectoolSpectral *spectral,
+											   SpectoolWidget *wwidget,
+											   spectool_sample_sweep *sweep) {
+	double sweep_time;
+	double delta;
+
+	if (spectral == NULL || wwidget == NULL || sweep == NULL)
+		return;
+
+	sweep_time = spectool_spectral_sweep_seconds(sweep);
+	if (sweep_time <= 0)
+		return;
+
+	if (spectral->seconds_per_row <= 0 && spectral->last_sweep_time > 0) {
+		delta = sweep_time - spectral->last_sweep_time;
+		if (delta > 0) {
+			spectral->seconds_per_row = delta;
+			spectral->time_axis_seconds =
+				delta * (wwidget->sweepcache->num_alloc - 1);
+		}
+	}
+
+	spectral->last_sweep_time = sweep_time;
+}
+
 static void spectool_spectral_class_init(SpectoolSpectralClass *class);
 static void spectool_spectral_init(SpectoolSpectral *graph);
 static void spectool_spectral_destroy(GtkObject *object);
@@ -131,6 +279,7 @@ void spectool_spectral_draw(GtkWidget *widget, cairo_t *cr, SpectoolWidget *wwid
 	SpectoolSpectral *spectral;
 	int nsamp, pos, sp;
 	int sh, b_s_y;
+	int done = 0;
 	cairo_pattern_t *pattern;
 	cairo_matrix_t matrix;
 	GdkPixmap *linemap;
@@ -157,23 +306,10 @@ void spectool_spectral_draw(GtkWidget *widget, cairo_t *cr, SpectoolWidget *wwid
 	 * after the current position.  We want to go back /drawable/ samples,
 	 * so hack in a smarter decrement based on how we know the ring works.
 	 * Probably an ugly way of doing it. */
-	if (wwidget->sweepcache->pos >= (wwidget->g_len_y / sh)) {
-		nsamp = wwidget->sweepcache->pos - (wwidget->g_len_y / sh);
-	} else if (wwidget->sweepcache->sweeplist[wwidget->sweepcache->num_alloc - 1] !=
-			   NULL) {
-		nsamp = wwidget->sweepcache->num_alloc - ((wwidget->g_len_y / sh) -
-												  wwidget->sweepcache->pos);
-	} else {
-		nsamp = 0;
-	}
-
-	/* Catch rounding errors and other silliness */
-	if (nsamp < 0)
-		nsamp = 0;
+	nsamp = spectool_spectral_first_visible(wwidget, sh);
 
 	pos = 0;
-	while (nsamp != wwidget->sweepcache->pos && 
-		   pos <= wwidget->sweepcache->num_alloc) {
+	while (!done && pos <= wwidget->sweepcache->num_alloc) {
 		spectool_sample_sweep *samp;
 
 		/* Loop around the ring */
@@ -198,6 +334,9 @@ void spectool_spectral_draw(GtkWidget *widget, cairo_t *cr, SpectoolWidget *wwid
 				   nsamp, spectral->line_cache_len);
 			return;
 		}
+
+		if (nsamp == wwidget->sweepcache->pos)
+			done = 1;
 
 		if (spectral->line_cache[nsamp] == NULL) {
 			/* Current sample */
@@ -264,6 +403,8 @@ void spectool_spectral_draw(GtkWidget *widget, cairo_t *cr, SpectoolWidget *wwid
 		pos++;
 
 	}
+
+	spectool_spectral_draw_time_axis(cr, wwidget, spectral->time_axis_seconds);
 
 	cairo_restore(cr);
 }
@@ -379,11 +520,16 @@ static void spectool_spectral_wdr_sweep(int slot, int mode,
 									  wwidget->sweepcache->num_alloc);
 		spectral->line_cache_len = wwidget->sweepcache->num_alloc;
 		spectral->n_sweeps_delta = 0;
+		spectral->last_sweep_time = 0;
+		spectral->seconds_per_row = 0;
+		spectral->time_axis_seconds = 0;
 
 		for (x = 0; x < spectral->line_cache_len; x++) {
 			spectral->line_cache[x] = NULL;
 		}
 	} else if ((mode & SPECTOOL_POLL_SWEEPCOMPLETE)) {
+		spectool_spectral_update_time_axis(spectral, wwidget, sweep);
+
 		/* Null out this sweep in the cache so we have to recalculate it */
 		if (wwidget->sweepcache->pos >= 0 && 
 			wwidget->sweepcache->pos < spectral->line_cache_len) {
@@ -560,5 +706,7 @@ static void spectool_spectral_init(SpectoolSpectral *spectral) {
 	gtk_widget_show(spectral->legend_pix);
 
 	spectral->oldx = spectral->oldy = 0;
+	spectral->last_sweep_time = 0;
+	spectral->seconds_per_row = 0;
+	spectral->time_axis_seconds = 0;
 }
-

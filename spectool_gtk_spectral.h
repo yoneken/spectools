@@ -71,6 +71,10 @@ struct _SpectoolSpectral {
 	int line_cache_len;
 	int n_sweeps_delta;
 
+	double last_sweep_time;
+	double seconds_per_row;
+	double time_axis_seconds;
+
 	int oldx, oldy;
 };
 
@@ -86,4 +90,3 @@ G_END_DECLS
 
 #endif
 #endif
-
